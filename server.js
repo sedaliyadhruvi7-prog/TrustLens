@@ -16,19 +16,28 @@ app.use(express.static(path.join(__dirname, 'public')));
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 });
 app.use('/api/', limiter);
 
+// --- 1. DATABASE CONFIGURATION (Updated for Aiven Cloud) ---
 const pool = mysql.createPool({
-  host: process.env.DB_HOST, user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD, database: process.env.DB_NAME
+  host: process.env.DB_HOST, 
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD, 
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT || 3306,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
 });
 
+// --- 2. SESSION CONFIGURATION ---
 const sessionStore = new MySQLStore({}, pool);
 app.use(session({
   key: 'trustlens.sid', secret: process.env.SESSION_SECRET,
   store: sessionStore, resave: false, saveUninitialized: true,
-  cookie: { httpOnly: true, secure: false, sameSite: 'lax', maxAge: 1000 * 60 * 60 * 24 } // 24 hours
+  cookie: { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 1000 * 60 * 60 * 24 } 
 }));
 
-// --- Middleware ---
+// --- 3. MIDDLEWARE ---
 const requireAuth = (req, res, next) => {
   if (!req.session.user) return res.status(401).json({ error: 'Please login to access this feature.' });
   next();
@@ -38,7 +47,7 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-// --- Advanced Risk Engine ---
+// --- 4. RISK ENGINE ---
 function analyzeRisk(type, content) {
   let score = 0;
   let findings = [];
@@ -65,9 +74,9 @@ function analyzeRisk(type, content) {
   return { score, level, findings };
 }
 
-// --- APIs ---
+// --- 5. API ROUTES ---
 
-// 1. Auth
+// Auth
 app.post('/api/auth/register', async (req, res) => {
   const { username, email, password } = req.body;
   const hash = await bcrypt.hash(password, 12);
@@ -91,7 +100,7 @@ app.post('/api/auth/login', async (req, res) => {
 app.get('/api/auth/me', (req, res) => res.json({ user: req.session.user || null }));
 app.post('/api/auth/logout', (req, res) => { req.session.destroy(); res.clearCookie('trustlens.sid'); res.json({ success: true }); });
 
-// 2. Scanner & History
+// Scanner & History
 app.post('/api/scans/analyze', async (req, res) => {
   const { type, content } = req.body;
   const { score, level, findings } = analyzeRisk(type, content);
@@ -131,52 +140,21 @@ app.get('/api/user/stats', async (req, res) => {
   res.json({ totalScans, highRisk, points });
 });
 
-// 3. Admin
-app.get('/api/admin/stats', requireAdmin, async (req, res) => {
-  const [[{ users }]] = await pool.query('SELECT COUNT(*) as users FROM users');
-  const [[{ scans }]] = await pool.query('SELECT COUNT(*) as scans FROM scans');
-  const [[{ reports }]] = await pool.query("SELECT COUNT(*) as reports FROM community_reports WHERE status = 'pending'");
-  res.json({ users, scans, reports });
-});
-
-app.listen(process.env.PORT, () => {
-  console.log(`\n=========================================`);
-  console.log(`🚀 TrustLens Enterprise is LIVE!`);
-  console.log(`🌐 Open: http://localhost:${process.env.PORT}`);
-  console.log(`=========================================\n`);
-});
-
-
-// --- NEW: Email Authenticity Analyzer ---
+// Email Analyzer (Moved ABOVE app.listen)
 app.post('/api/analyze/email-headers', (req, res) => {
   const { headers } = req.body;
   let findings = [];
   let score = 0;
   const lower = headers.toLowerCase();
 
-  // SPF Check
-  if (lower.includes('spf=fail') || lower.includes('spf=softfail')) {
-    score += 30;
-    findings.push('SPF check failed. The sender does not have permission to send from this domain.');
-  } else if (lower.includes('spf=pass')) {
-    findings.push('SPF check passed. The sender IP is authorized by the domain.');
-  }
+  if (lower.includes('spf=fail') || lower.includes('spf=softfail')) { score += 30; findings.push('SPF check failed. The sender does not have permission to send from this domain.'); } 
+  else if (lower.includes('spf=pass')) { findings.push('SPF check passed. The sender IP is authorized by the domain.'); }
 
-  // DKIM Check
-  if (lower.includes('dkim=fail')) {
-    score += 30;
-    findings.push('DKIM signature failed. The email may have been tampered with in transit.');
-  } else if (lower.includes('dkim=pass')) {
-    findings.push('DKIM check passed. The email signature is cryptographically valid.');
-  }
+  if (lower.includes('dkim=fail')) { score += 30; findings.push('DKIM signature failed. The email may have been tampered with in transit.'); } 
+  else if (lower.includes('dkim=pass')) { findings.push('DKIM check passed. The email signature is cryptographically valid.'); }
 
-  // DMARC Check
-  if (lower.includes('dmarc=fail')) {
-    score += 40;
-    findings.push('DMARC policy failed. The email claims to be from a domain that rejects unauthorized mail.');
-  }
+  if (lower.includes('dmarc=fail')) { score += 40; findings.push('DMARC policy failed. The email claims to be from a domain that rejects unauthorized mail.'); }
 
-  // Sender Mismatch (Reply-To differs from From)
   const fromMatch = headers.match(/From:.*?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
   const replyMatch = headers.match(/Reply-To:.*?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
   if (fromMatch && replyMatch && fromMatch[1] !== replyMatch[1]) {
@@ -190,4 +168,21 @@ app.post('/api/analyze/email-headers', (req, res) => {
   if (findings.length === 0) findings.push('No major authentication failures detected in the provided headers.');
 
   res.json({ score, level, findings });
+});
+
+// Admin
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
+  const [[{ users }]] = await pool.query('SELECT COUNT(*) as users FROM users');
+  const [[{ scans }]] = await pool.query('SELECT COUNT(*) as scans FROM scans');
+  const [[{ reports }]] = await pool.query("SELECT COUNT(*) as reports FROM community_reports WHERE status = 'pending'");
+  res.json({ users, scans, reports });
+});
+
+// --- 6. START SERVER (MUST BE LAST) ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`\n=========================================`);
+  console.log(`🚀 TrustLens Enterprise is LIVE!`);
+  console.log(`🌐 Open: http://localhost:${PORT}`);
+  console.log(`=========================================\n`);
 });
