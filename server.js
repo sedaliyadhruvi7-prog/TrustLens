@@ -34,7 +34,12 @@ const sessionStore = new MySQLStore({}, pool);
 app.use(session({
   key: 'trustlens.sid', secret: process.env.SESSION_SECRET,
   store: sessionStore, resave: false, saveUninitialized: true,
-  cookie: { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 1000 * 60 * 60 * 24 } 
+  cookie: { 
+    httpOnly: true, 
+    secure: process.env.NODE_ENV === 'production', // <--- Change this
+    sameSite: 'lax', 
+    maxAge: 1000 * 60 * 60 * 24 
+  }
 }));
 
 // --- 3. MIDDLEWARE ---
